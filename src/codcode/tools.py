@@ -1,4 +1,4 @@
-"""Security-oriented tool definitions for codcode."""
+"""Tool definitions available to the cod agent."""
 
 import hashlib
 import os
