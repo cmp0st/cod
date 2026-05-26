@@ -82,8 +82,7 @@ class Harness:
 
     def send(self, user_input: str) -> None:
         """Send a user message and stream the response to the console."""
-        console.print(f"\n[bold cyan]you:[/] {escape(user_input)}")
-        console.print("[bold magenta]codcode:[/] ", end="")
+        console.print("\n[bold cyan]><((((°>[/] ", end="")
 
         stream = self._conversation.send_message_async(user_input)
         for chunk in stream:
@@ -91,7 +90,7 @@ class Harness:
                 if item.get("type") == "text":
                     console.print(item["text"], end="")
 
-        console.print()  # newline after response
+        console.print("\n")  # newline after response
 
 
 def _wrap_tools_with_approval(tools: list) -> list:
