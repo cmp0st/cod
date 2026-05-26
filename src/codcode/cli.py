@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sys
+from pathlib import Path
 
 from prompt_toolkit import PromptSession
 from prompt_toolkit.history import InMemoryHistory
@@ -55,7 +56,7 @@ def main(argv: list[str] | None = None) -> int:
     redirect_engine_logs()
 
     try:
-        with Harness(model_path, require_approval=not args.no_approval) as harness:
+        with Harness(model_path, working_dir=Path.cwd(), require_approval=not args.no_approval) as harness:
             console.print("[dim]Type your message. Ctrl-C or Ctrl-D to quit.[/]\n")
             while True:
                 try:

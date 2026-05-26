@@ -4,14 +4,17 @@ from __future__ import annotations
 
 import os
 import sys
+from pathlib import Path
 
 import litert_lm
 from rich.console import Console
 from rich.markup import escape
 from rich.panel import Panel
 
+from .kernel import ensure_kernel_and_initrd
 from .paths import CACHE_DIR, LOG_DIR
-from .tools import ALL_TOOLS
+from .tools import ALL_TOOLS, configure as configure_tools
+from .vm import SandboxVM
 
 console = Console()
 
@@ -41,18 +44,38 @@ def redirect_engine_logs() -> None:
 
 
 class Harness:
-    def __init__(self, model_path: Path, require_approval: bool = True) -> None:
+    def __init__(
+        self,
+        model_path: Path,
+        working_dir: Path,
+        require_approval: bool = True,
+    ) -> None:
         self.model_path = model_path
+        self.working_dir = working_dir.resolve()
         self.require_approval = require_approval
         self._engine: litert_lm.Engine | None = None
         self._conversation = None
+        self._vm: SandboxVM | None = None
 
     def __enter__(self) -> "Harness":
+        # Start sandbox VM first
+        kernel, initrd = ensure_kernel_and_initrd()
+        self._vm = SandboxVM(
+            shared_dir=self.working_dir,
+            kernel=kernel,
+            initrd=initrd,
+        )
+        console.print("[dim]Starting sandbox VM...[/]")
+        self._vm.start()
+        configure_tools(self._vm, self.working_dir)
+        console.print("[dim]Sandbox ready.[/]\n")
+
         console.print(
             Panel(
                 "[bold green]codcode[/] — security-oriented agent harness\n"
                 f"[dim]model: {self.model_path.name}[/]\n"
-                f"[dim]logs:  {LOG_DIR / 'engine.log'}[/]",
+                f"[dim]logs:  {LOG_DIR / 'engine.log'}[/]\n"
+                f"[dim]sandbox: {self.working_dir}[/]",
                 border_style="green",
             )
         )
@@ -65,7 +88,9 @@ class Harness:
         self._engine.__enter__()
 
         messages = [litert_lm.Message.system(SYSTEM_PROMPT)]
-        tools = _wrap_tools_with_approval(ALL_TOOLS) if self.require_approval else ALL_TOOLS
+        tools = (
+            _wrap_tools_with_approval(ALL_TOOLS) if self.require_approval else ALL_TOOLS
+        )
 
         self._conversation = self._engine.create_conversation(
             messages=messages,
@@ -79,6 +104,8 @@ class Harness:
             self._conversation.__exit__(*args)
         if self._engine:
             self._engine.__exit__(*args)
+        if self._vm:
+            self._vm.stop()
 
     def send(self, user_input: str) -> None:
         """Send a user message and stream the response to the console."""
@@ -115,7 +142,7 @@ def _make_approval_wrapper(fn):
         )
         try:
             answer = console.input("[bold yellow]Allow? [y/N]:[/] ").strip().lower()
-        except (EOFError, KeyboardInterrupt):
+        except EOFError, KeyboardInterrupt:
             answer = "n"
 
         if answer == "y":

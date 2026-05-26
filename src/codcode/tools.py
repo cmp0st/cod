@@ -1,10 +1,42 @@
-"""Tool definitions available to the cod agent."""
+"""Tool definitions. All tools execute inside the sandbox VM."""
 
-import hashlib
-import os
+from __future__ import annotations
+
 import shlex
-import stat
-import subprocess
+from pathlib import Path
+
+from .vm import SandboxVM
+
+_vm: SandboxVM | None = None
+_shared_dir: Path | None = None
+
+
+def configure(vm: SandboxVM, shared_dir: Path) -> None:
+    global _vm, _shared_dir
+    _vm = vm
+    _shared_dir = shared_dir.resolve()
+
+
+def _vp(path: str) -> str:
+    """Translate a host absolute path under shared_dir to its /workspace equivalent."""
+    if _shared_dir is None:
+        return path
+    try:
+        rel = Path(path).resolve().relative_to(_shared_dir)
+        return f"/workspace/{rel}"
+    except ValueError:
+        return path  # outside shared_dir; pass through and let the VM reject it
+
+
+def _exec(cmd: str, cwd: str | None = None, timeout: int = 30) -> str:
+    if _vm is None:
+        return "Error: sandbox VM is not running"
+    full = f"cd {shlex.quote(cwd)} && {cmd}" if cwd else cmd
+    out, code = _vm.run(full, timeout=timeout)
+    result = out.rstrip("\n")
+    if not result:
+        return f"(exit {code})" if code else "(no output)"
+    return result
 
 
 def read_file(path: str) -> str:
@@ -13,30 +45,16 @@ def read_file(path: str) -> str:
     Args:
         path: Absolute or relative path to the file to read.
     """
-    try:
-        with open(path) as f:
-            return f.read()
-    except Exception as e:
-        return f"Error reading file: {e}"
+    return _exec(f"cat {shlex.quote(_vp(path))}")
 
 
 def list_directory(path: str) -> str:
     """List files and directories at a given path.
 
     Args:
-        path: Directory path to list. Defaults to current directory.
+        path: Directory path to list.
     """
-    try:
-        entries = []
-        for name in sorted(os.listdir(path)):
-            full = os.path.join(path, name)
-            s = os.stat(full)
-            mode = stat.filemode(s.st_mode)
-            size = s.st_size
-            entries.append(f"{mode}  {size:>10}  {name}")
-        return "\n".join(entries) if entries else "(empty directory)"
-    except Exception as e:
-        return f"Error listing directory: {e}"
+    return _exec(f"ls -la {shlex.quote(_vp(path))}")
 
 
 def hash_file(path: str, algorithm: str = "sha256") -> str:
@@ -46,17 +64,10 @@ def hash_file(path: str, algorithm: str = "sha256") -> str:
         path: Path to the file to hash.
         algorithm: Hash algorithm to use (md5, sha1, sha256, sha512). Defaults to sha256.
     """
-    supported = {"md5", "sha1", "sha256", "sha512"}
-    if algorithm not in supported:
-        return f"Unsupported algorithm '{algorithm}'. Choose from: {', '.join(supported)}"
-    try:
-        h = hashlib.new(algorithm)
-        with open(path, "rb") as f:
-            for chunk in iter(lambda: f.read(65536), b""):
-                h.update(chunk)
-        return f"{algorithm}:{h.hexdigest()}  {path}"
-    except Exception as e:
-        return f"Error hashing file: {e}"
+    cmds = {"md5": "md5sum", "sha1": "sha1sum", "sha256": "sha256sum", "sha512": "sha512sum"}
+    if algorithm not in cmds:
+        return f"Unsupported algorithm '{algorithm}'. Choose from: {', '.join(cmds)}"
+    return _exec(f"{cmds[algorithm]} {shlex.quote(_vp(path))}")
 
 
 def check_permissions(path: str) -> str:
@@ -65,60 +76,18 @@ def check_permissions(path: str) -> str:
     Args:
         path: Path to inspect.
     """
-    try:
-        s = os.stat(path)
-        mode = stat.filemode(s.st_mode)
-        uid = s.st_uid
-        gid = s.st_gid
-        octal = oct(s.st_mode)
-        lines = [
-            f"path:    {path}",
-            f"mode:    {mode}  ({octal})",
-            f"uid:     {uid}",
-            f"gid:     {gid}",
-            f"size:    {s.st_size} bytes",
-        ]
-        # SUID/SGID/sticky warnings
-        if s.st_mode & stat.S_ISUID:
-            lines.append("WARNING: SUID bit is set")
-        if s.st_mode & stat.S_ISGID:
-            lines.append("WARNING: SGID bit is set")
-        if s.st_mode & stat.S_ISVTX:
-            lines.append("NOTE: Sticky bit is set")
-        return "\n".join(lines)
-    except Exception as e:
-        return f"Error checking permissions: {e}"
+    return _exec(f"stat {shlex.quote(_vp(path))}")
 
 
 def run_command(command: str, working_dir: str = ".") -> str:
-    """Run a shell command and return its output. Use with caution.
+    """Run a shell command and return its output.
 
     Args:
         command: The shell command to execute.
-        working_dir: Directory to run the command in. Defaults to current directory.
+        working_dir: Directory to run the command in. Defaults to the project root.
     """
-    try:
-        result = subprocess.run(
-            shlex.split(command),
-            capture_output=True,
-            text=True,
-            cwd=working_dir,
-            timeout=30,
-        )
-        out = result.stdout
-        err = result.stderr
-        parts = []
-        if out:
-            parts.append(f"stdout:\n{out.rstrip()}")
-        if err:
-            parts.append(f"stderr:\n{err.rstrip()}")
-        if result.returncode != 0:
-            parts.append(f"exit code: {result.returncode}")
-        return "\n".join(parts) if parts else "(no output)"
-    except subprocess.TimeoutExpired:
-        return "Error: command timed out after 30 seconds"
-    except Exception as e:
-        return f"Error running command: {e}"
+    cwd = _translate_working_dir(working_dir)
+    return _exec(command, cwd=cwd, timeout=30)
 
 
 def search_in_file(path: str, pattern: str) -> str:
@@ -128,17 +97,16 @@ def search_in_file(path: str, pattern: str) -> str:
         path: Path to the file to search.
         pattern: Text pattern to search for (case-sensitive substring match).
     """
-    try:
-        matches = []
-        with open(path) as f:
-            for i, line in enumerate(f, 1):
-                if pattern in line:
-                    matches.append(f"{i:5}: {line}", )
-        if not matches:
-            return f"No matches for '{pattern}' in {path}"
-        return f"{len(matches)} match(es):\n" + "".join(matches)
-    except Exception as e:
-        return f"Error searching file: {e}"
+    return _exec(f"grep -n {shlex.quote(pattern)} {shlex.quote(_vp(path))}")
+
+
+def _translate_working_dir(working_dir: str) -> str:
+    if working_dir in (".", ""):
+        return "/workspace"
+    wd = Path(working_dir)
+    if wd.is_absolute():
+        return _vp(working_dir)
+    return f"/workspace/{wd}"
 
 
 ALL_TOOLS = [
